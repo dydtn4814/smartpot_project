@@ -9,7 +9,7 @@ https://docs.djangoproject.com/en/5.2/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
-
+import os
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -28,7 +28,7 @@ SECRET_KEY = os.getenv('SECRET_KEY')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['54.180.145.146', 'localhost', '127.0.0.1']
+ALLOWED_HOSTS = ['*']
 
 
 # Application definition
@@ -120,8 +120,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
-KAKAO_REST_API_KEY = os.getenv('KAKAO_REST_API_KEY')
-KAKAO_REDIRECT_URI = 'http://localhost:8000/accounts/kakao/callback/'  # 콜백 URL
+#KAKAO_REST_API_KEY = os.getenv('KAKAO_REST_API_KEY')
+#KAKAO_REDIRECT_URI = 'http://localhost:8000/accounts/kakao/callback/'  # 콜백 URL
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
