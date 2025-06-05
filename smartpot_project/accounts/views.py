@@ -13,7 +13,7 @@ from datetime import timedelta
 
 
 
-RASPI_TEMP_API_URL = "http://127.0.0.1:5000/sensor/temp"
+RASPI_TEMP_API_URL = "http://192.168.0.15:5000/sensor/temp"
 RASPI_HUMI_API_URL = "http://127.0.0.1:5000/sensor/humi"
 RASPI_SOIL_API_URL = "http://127.0.0.1:5000/sensor/soil"
 RASPI_PUMP_API_URL = "http://127.0.0.1:5000/control/pump"
