@@ -13,10 +13,10 @@ from datetime import timedelta
 
 
 
-RASPI_TEMP_API_URL = "http://127.0.0.1:5000/sensor/temp"
-RASPI_HUMI_API_URL = "http://127.0.0.1:5000/sensor/humi"
-RASPI_SOIL_API_URL = "http://127.0.0.1:5000/sensor/soil"
-RASPI_PUMP_API_URL = "http://127.0.0.1:5000/control/pump"
+RASPI_TEMP_API_URL = "http://192.168.0.15:5000/sensor/temp" #같은와이파이
+RASPI_HUMI_API_URL = "http://192.168.0.15:5000/sensor/humi"
+RASPI_SOIL_API_URL = "http://192.168.0.15:5000/sensor/soil"
+RASPI_PUMP_API_URL = "http://192.168.0.15:5000/control/pump"
 
 
 @csrf_exempt
@@ -59,11 +59,11 @@ def kakao_webhook(request):
                 response_soil.raise_for_status()
                 soil_data = response_soil.json()
 
-                soil_moisture = soil_data.get("soil_moisture","알 수 없음")
+                soil_moisture = soil_data.get("soil_moisture_percentage","알 수 없음")
                 reply_text = f"현재 토양 수분은 🌱{soil_moisture}% 입니다."
              
             except requests.RequestException:
-                reply_text = "센서에서 토양 수분 정보를 가져오지 못했어요."
+                reply_text = "센서에서 토양 수분 정보를 가져오지 못했어요 😢"
                 
             return JsonResponse(make_sensor_quickreply_kakao_response(reply_text))
 
@@ -102,7 +102,7 @@ def kakao_webhook(request):
 
 # 온습도 동향 조회 구현
 @csrf_exempt 
-def receive_sensor_data(request): #라즈베리파이단에서의 post요청 받기, db저장
+def receive_sensor_data(request): #라즈베리파이단에서의 데이터 센서값 post요청 받기, db저장
     if request.method == 'POST':
         try:
             data = json.loads(request.body)
@@ -133,7 +133,7 @@ def receive_sensor_data(request): #라즈베리파이단에서의 post요청 받
 
 def get_recent_sensor_data(): # 온습도 동향 조회 
 
-    cutoff = timezone.now() - timedelta(minutes=10) # 현재시각 기준으로 10분전 데이터들 get
+    cutoff = timezone.now() - timedelta(hours=1) # 현재시각 기준으로 10분전 데이터들 get
     data_qs = SensorData.objects.filter(timestamp__gte=cutoff).order_by('-timestamp')#최근데이터부터
 
     # 최근 1일치 데이터 리스트를 JSON으로 변환
@@ -162,8 +162,46 @@ def conv_dic_to_text(data):
     text += f"날짜 {time} \n온도:{tem} | 습도:{humi} | 토양수분:{soil_moisture}\n\n"
     
   return text
-  
 
+@csrf_exempt 
+def get_setting_values(request):
+    if request.method == 'POST':
+        if SoilMoistureThreshold.objects.first() == None:
+            soil_moi_tres_val = None
+        else: 
+            soil_moi_tres_val = SoilMoistureThreshold.objects.first().value
+        
+        # 습도 기준값도 추가하기
+
+        return JsonResponse(
+        {
+        "version": "2.0",
+        "template": {
+            "outputs": [
+                {
+                "simpleText": {
+                    "text": f"현재 기준 토양수분값 : {soil_moi_tres_val}%"
+                }
+            }
+            ],
+            "quickReplies": [
+                    {
+                    "label": "🏠처음으로",
+                    "action": "block",
+                    "blockId": "683941302c50e1482b1ed155", 
+                    }, 
+                    {
+                    "label": "⚙️설정",
+                    "action": "block",
+                    "blockId": "683d83dcc5b310190b6f79e4", 
+                    } 
+                    ] 
+        
+        }
+        })
+
+        
+    
 
 @csrf_exempt
 def set_soil_moisture_threshold(request):
@@ -185,33 +223,37 @@ def set_soil_moisture_threshold(request):
             })
 
         # 기존 값 삭제하고 저장 (또는 update)
-        previous_threshold = SoilMoistureThreshold.objects.first().value
+        if(SoilMoistureThreshold.objects.first()==None):
+            previous_threshold = 'None'
+        else:
+            previous_threshold = SoilMoistureThreshold.objects.first().value
 
         SoilMoistureThreshold.objects.all().delete()
         SoilMoistureThreshold.objects.create(value=threshold_value)
 
-        return JsonResponse(
-            {
-            "version": "2.0",
-            "template": {
-                "outputs": [
-                    {
-                    "simpleText": {
-                        "text": f"기준 토양습도 🌱{previous_threshold}% 에서 🌱{threshold_value}%로 설정되었습니다."
-                    }
-                }
-                ],
-                "quickReplies": [
-                      {
-                        "label": "🏠처음으로",
-                        "action": "block",
-                        "blockId": "683941302c50e1482b1ed155", 
-                    },  
-                      ] 
+        text = f"기준 토양습도\n🌱{previous_threshold}% 에서\n🌱{threshold_value}% 로 설정되었습니다."
+        return JsonResponse(make_kakao_response(text))
+        # return JsonResponse(
+        #     {
+        #     "version": "2.0",
+        #     "template": {
+        #         "outputs": [
+        #             {
+        #             "simpleText": {
+        #                 "text": f"기준 토양습도 🌱{previous_threshold}% 에서 🌱{threshold_value}%로 설정되었습니다."
+        #             }
+        #         }
+        #         ],
+        #         "quickReplies": [
+        #               {
+        #                 "label": "🏠처음으로",
+        #                 "action": "block",
+        #                 "blockId": "683941302c50e1482b1ed155", 
+        #             },  
+        #               ] 
             
-            }
-            })
-
+        #     }
+        #     })
 
 
 
