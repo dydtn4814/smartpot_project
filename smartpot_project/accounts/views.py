@@ -11,13 +11,13 @@ from django.utils import timezone
 from datetime import timedelta
 
 
-
-
 RASPI_TEMP_API_URL = "http://192.168.0.15:5000/sensor/temp" #같은와이파이
 RASPI_HUMI_API_URL = "http://192.168.0.15:5000/sensor/humi"
 RASPI_SOIL_API_URL = "http://192.168.0.15:5000/sensor/soil"
 RASPI_PUMP_API_URL = "http://192.168.0.15:5000/control/pump"
 
+RASPI_LED_API_URL = "http://192.168.0.15:5000/control/led"
+RASPI_HUMIDIFIER_API_URL = "http://192.168.0.15:5000/control/humidifier"
 
 @csrf_exempt
 def kakao_webhook(request):
@@ -83,6 +83,44 @@ def kakao_webhook(request):
             except requests.RequestException:
                 reply_text = "펌프에 명령을 보내는 데 실패했어요. 잠시 후 다시 시도해주세요."
             
+            return JsonResponse(make_kakao_response(reply_text))
+        
+        # --- 가습기 제어 로직 추가 ---
+        elif "가습기 작동" in user_message:
+            try:
+                payload = {}
+                response_humidifier = requests.post(RASPI_HUMIDIFIER_API_URL, json=payload, timeout=15)
+                response_humidifier.raise_for_status()    
+                humidifier_response_data = response_humidifier.json()
+
+                if humidifier_response_data.get("status") == "busy":
+                    reply_text = humidifier_response_data.get("message", "가습기가 이미 작동 중이에요.")
+                else:
+                    reply_text = "가습기를 3초 동안 작동시켰어요."
+
+            except requests.RequestException as e:
+                reply_text = f"가습기 제어에 실패했어요. ({e})"
+                
+            return JsonResponse(make_kakao_response(reply_text))
+
+        # --- 네오픽셀 LED 제어 ---
+        elif "led" in user_message in user_message:
+            payload = None
+            if "꺼" in user_message:
+                payload = {"state": "off"}
+            elif "켜" in user_message:
+                payload = {"state": "on"}
+            
+            if payload:
+                try:
+                    response_led = requests.post(RASPI_LED_API_URL, json=payload, timeout=5)
+                    response_led.raise_for_status()
+                    reply_text = response_led.json().get("message", "LED 상태를 변경했어요.")
+                except requests.RequestException as e:
+                    reply_text = f"LED 제어에 실패했어요. ({e})"
+            else:
+                reply_text = "'led 켜' 또는 'led 꺼' 라고 명령을 내려주세요."
+
             return JsonResponse(make_kakao_response(reply_text))
         
         elif "동향" in user_message:
@@ -205,8 +243,6 @@ def get_setting_values(request):
         })
 
         
-    
-
 @csrf_exempt
 def set_soil_moisture_threshold(request):
      if request.method == 'POST':
