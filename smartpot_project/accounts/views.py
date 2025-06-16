@@ -356,7 +356,8 @@ def get_humidity_threshold(request):
             return JsonResponse({
                 "status": "success",
                 "value": {
-                    "soil_moisture_threshold": current_threshold
+                    "humidity_threshold": current_threshold
+                    #"soil_moisture_threshold": current_threshold
                 }
             })
         except Exception as e:

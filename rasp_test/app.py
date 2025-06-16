@@ -17,8 +17,7 @@ app = Flask(__name__)
 POST_SENSOR_DATAS_URL = "http://192.168.0.34:8000/sensor/receive/"  #네트워크 바꾸고 , 장고서버 열떄 python manage.py runserver 0.0.0.0:8000
 
 GET_SOIL_MOISTURE_THRESHOLD_URL = "http://192.168.0.34:8000/soil_moisture_threshold/"
-# 와이파이주소 업데이터하기
-# GET_SOIL_HUMIDITY_THRESHOLD_URL = "http://192.168.0.34:8000/humidity_threshold/"
+GET_HUMIDITY_THRESHOLD_URL = "http://192.168.0.34:8000/humidity_threshold/"
 
 #온습도 센서 설정
 TEM_HUMI_SENSOR_PIN = board.D23
@@ -42,6 +41,7 @@ except FileNotFoundError:
 except Exception as e:
     print(f"SMBus 초기화 중 오류 발생: {e}")
     bus = None
+
 # 워터 펌프 릴레이 핀 설정
 PUMP_PIN_NUMBER = board.D17
 pump_pin = None
@@ -58,6 +58,41 @@ except Exception as e:
 pump_is_busy = False
 pump_lock = threading.Lock()
 duration_seconds = 3
+
+# 가습기 모듈 핀 설정
+HUMIDIFIER_PIN_NUMBER = board.D24
+humidifier_pin = None
+try:
+    humidifier_pin = digitalio.DigitalInOut(HUMIDIFIER_PIN_NUMBER)
+    humidifier_pin.direction = digitalio.Direction.OUTPUT
+    humidifier_pin.value = False
+    print(f"가습기 핀 (GPIO{HUMIDIFIER_PIN_NUMBER.id}) 초기화 완료.")
+except Exception as e:
+    print(f"가습기 핀 초기화 실패: {e}")
+
+humidifier_is_busy = False
+humidifier_lock = threading.Lock()
+FIXED_HUMIDIFIER_DURATION_SECONDS = 3
+
+# 네오픽셀 LED 설정
+NEOPIXEL_PIN = board.D18
+NUM_PIXELS = 16
+DEFAULT_BRIGHTNESS = 0.5
+DEFAULT_COLOR = (255, 255, 255)
+pixels = None
+try:
+    pixels = neopixel.NeoPixel(NEOPIXEL_PIN, NUM_PIXELS, auto_write=False)
+    pixels.fill((0, 0, 0)); pixels.show()
+    print("네오픽셀 초기화 완료.")
+except Exception as e:
+    print(f"네오픽셀 초기화 실패: {e}")
+
+# ===== 자동 제어를 위한 전역 변수 추가 =====
+current_soil_moisture_threshold = None
+current_humidity_threshold = None
+last_auto_pump_time = 0
+last_auto_humidifier_time = 0
+AUTO_CONTROL_COOLDOWN = 300  # 5분 쿨다운 (같은 장치 연속 작동 방지)
 
 # 헬퍼 함수: 일정 시간 펌프 작동 후 끄기 (스레드에서 실행)
 def _operate_pump_for_duration():
@@ -90,6 +125,90 @@ def _operate_pump_for_duration():
         print("펌프 작동 완료, 플래그 해제.")
         return 1
 
+# 헬퍼 함수: 일정 시간 가습기 작동
+def _operate_humidifier_for_duration():
+    global humidifier_is_busy
+    
+    if humidifier_pin is None:
+        print("오류: 가습기 핀이 초기화되지 않아 작동할 수 없습니다.")
+        with humidifier_lock:
+            humidifier_is_busy = False
+        return
+
+    print(f"{FIXED_HUMIDIFIER_DURATION_SECONDS}초 동안 가습기 작동을 시작합니다.")
+    try:
+        humidifier_pin.value = True
+        print("가습기 ON")
+        
+        time.sleep(FIXED_HUMIDIFIER_DURATION_SECONDS)
+        
+        humidifier_pin.value = False
+        print("가습기 OFF")
+        
+    except Exception as e:
+        print(f"가습기 작동 중 오류 발생: {e}")
+        if humidifier_pin:
+            humidifier_pin.value = False
+            print("오류 발생으로 가습기 강제 OFF")
+    finally:
+        with humidifier_lock:
+            humidifier_is_busy = False
+        print("가습기 작동 완료, 플래그 해제.")
+        return 1
+
+# ===== 자동 제어 함수들 추가 =====
+def auto_pump_control(current_soil_moisture):
+    """토양 수분이 임계값보다 낮으면 자동으로 펌프 작동"""
+    global last_auto_pump_time, pump_is_busy
+    
+    if current_soil_moisture_threshold is None:
+        return
+    
+    current_time = time.time()
+    
+    # 토양 수분이 임계값보다 낮고, 쿨다운 시간이 지났으며, 펌프가 작동중이지 않을 때
+    if (current_soil_moisture < current_soil_moisture_threshold and 
+        current_time - last_auto_pump_time > AUTO_CONTROL_COOLDOWN and 
+        not pump_is_busy):
+        
+        print(f"🚨 자동 급수 작동! 현재 토양수분: {current_soil_moisture}%, 임계값: {current_soil_moisture_threshold}%")
+        
+        with pump_lock:
+            if not pump_is_busy:
+                pump_is_busy = True
+                last_auto_pump_time = current_time
+                
+                # 백그라운드에서 펌프 작동
+                pump_thread = threading.Thread(target=_operate_pump_for_duration)
+                pump_thread.daemon = True
+                pump_thread.start()
+
+def auto_humidifier_control(current_humidity):
+    """습도가 임계값보다 낮으면 자동으로 가습기 작동"""
+    global last_auto_humidifier_time, humidifier_is_busy
+    
+    if current_humidity_threshold is None:
+        return
+    
+    current_time = time.time()
+    
+    # 습도가 임계값보다 낮고, 쿨다운 시간이 지났으며, 가습기가 작동중이지 않을 때
+    if (current_humidity < current_humidity_threshold and 
+        current_time - last_auto_humidifier_time > AUTO_CONTROL_COOLDOWN and 
+        not humidifier_is_busy):
+        
+        print(f"🚨 자동 가습기 작동! 현재 습도: {current_humidity}%, 임계값: {current_humidity_threshold}%")
+        
+        with humidifier_lock:
+            if not humidifier_is_busy:
+                humidifier_is_busy = True
+                last_auto_humidifier_time = current_time
+                
+                # 백그라운드에서 가습기 작동
+                humidifier_thread = threading.Thread(target=_operate_humidifier_for_duration)
+                humidifier_thread.daemon = True
+                humidifier_thread.start()
+
 # 워터 펌프 요청 처리 함수
 @app.route('/control/pump', methods=['POST'])
 def timed_pump_control():
@@ -104,61 +223,12 @@ def timed_pump_control():
             return jsonify({"status": "busy", "message": "펌프가 이미 작동 중입니다. 잠시 후 시도해주세요."}), 429 
         pump_is_busy = True 
 
-    # 스레드를 생성하여 펌프 작동 함수 실행
-   # pump_thread = threading.Thread(target=_operate_pump_for_duration)
     if _operate_pump_for_duration() == 1:
         message = "worked!"
     
     return jsonify({"status": "success", "message": message, "pump_state": "on", "duration": duration_seconds})
 
-# --- 가습기 모듈 핀 설정 추가 ---
-# 릴레이 없이 GPIO에 직접 연결하는 경우 (VCC, GND, DIN)
-HUMIDIFIER_PIN_NUMBER = board.D24 # GPIO 24번 핀 사용 예시
-humidifier_pin = None
-try:
-    humidifier_pin = digitalio.DigitalInOut(HUMIDIFIER_PIN_NUMBER)
-    humidifier_pin.direction = digitalio.Direction.OUTPUT
-    humidifier_pin.value = False # 초기 상태는 꺼짐 (LOW)
-    print(f"가습기 핀 (GPIO{HUMIDIFIER_PIN_NUMBER.id}) 초기화 완료.")
-except Exception as e:
-    print(f"가습기 핀 초기화 실패: {e}")
-
-# --- 가습기 작동 상태 및 동시 실행 방지를 위한 변수 추가 ---
-humidifier_is_busy = False
-humidifier_lock = threading.Lock()
-FIXED_HUMIDIFIER_DURATION_SECONDS = 3 # 가습기 작동 시간 3초로 고정
-
-# --- 헬퍼 함수: 일정 시간 가습기 작동 (스레드에서 실행) 추가 ---
-def _operate_humidifier_for_duration():
-    global humidifier_is_busy
-    
-    if humidifier_pin is None:
-        print("오류: 가습기 핀이 초기화되지 않아 작동할 수 없습니다.")
-        with humidifier_lock:
-            humidifier_is_busy = False
-        return
-
-    print(f"{FIXED_HUMIDIFIER_DURATION_SECONDS}초 동안 가습기 작동을 시작합니다.")
-    try:
-        humidifier_pin.value = True # GPIO HIGH로 켜기
-        print("가습기 ON")
-        
-        time.sleep(FIXED_HUMIDIFIER_DURATION_SECONDS) # 설정된 고정 시간만큼 대기
-        
-        humidifier_pin.value = False # GPIO LOW로 끄기
-        print("가습기 OFF")
-        
-    except Exception as e:
-        print(f"가습기 작동 중 오류 발생: {e}")
-        if humidifier_pin:
-            humidifier_pin.value = False
-            print("오류 발생으로 가습기 강제 OFF")
-    finally:
-        with humidifier_lock:
-            humidifier_is_busy = False
-        print("가습기 작동 완료, 플래그 해제.")
-
-# 가습기 제어 API 엔드포인트 추가
+# 가습기 제어 API 엔드포인트
 @app.route('/control/humidifier', methods=['POST'])
 def timed_humidifier_control():
     global humidifier_is_busy
@@ -175,25 +245,9 @@ def timed_humidifier_control():
     if _operate_humidifier_for_duration() == 1:
         message = "worked!"
 
-    print(message)
     return jsonify({"status": "success", "message": message, "humidifier_state": "on", "duration": FIXED_HUMIDIFIER_DURATION_SECONDS})
 
-# --- 네오픽셀 LED 설정 추가 ---
-# ...
-NEOPIXEL_PIN = board.D18
-NUM_PIXELS = 16
-# --- LED 켜기 명령 시 사용할 기본값 설정 ---
-DEFAULT_BRIGHTNESS = 0.5  # 기본 밝기 (0.1 ~ 1.0)
-DEFAULT_COLOR = (255, 255, 255) # 기본 색상 (흰색)
-pixels = None
-try:
-    pixels = neopixel.NeoPixel(NEOPIXEL_PIN, NUM_PIXELS, auto_write=False)
-    pixels.fill((0, 0, 0)); pixels.show()
-    print("네오픽셀 초기화 완료.")
-except Exception as e:
-    print(f"네오픽셀 초기화 실패: {e}")
-
-# --- API 엔드포인트: /control/led (네오픽셀 제어) ---
+# LED 제어 API 엔드포인트
 @app.route('/control/led', methods=['POST'])
 def control_led():
     if pixels is None:
@@ -203,7 +257,7 @@ def control_led():
         if not data:
             return jsonify({"error": "요청 본문이 비어있습니다."}), 400
         
-        state = data.get('state') # {"state": "on"} 또는 {"state": "off"}
+        state = data.get('state')
 
         if state == 'on':
             pixels.brightness = DEFAULT_BRIGHTNESS
@@ -228,7 +282,7 @@ def control_led():
         return jsonify({"error": error_message}), 500    
 
 @app.route('/sensor/humi', methods=['GET'])
-@app.route('/sensor/temp', methods=['GET']) # 장고서버에서 온습도 요청시 실행
+@app.route('/sensor/temp', methods=['GET'])
 def get_tem_humi_data():
     if dhtDevice is None:
         return jsonify({"error": "Sensor not initialized"}), 500
@@ -256,21 +310,16 @@ def get_tem_humi_data():
         return jsonify({"error": "An unexpected error occurred."}), 500
 
 
-# 토양 수분 센서값 전달 함수
-@app.route('/sensor/soil', methods=['GET']) # 장고서버에서 토양수분 요청시 실행
+@app.route('/sensor/soil', methods=['GET'])
 def get_soil_moisture_data():
-    if bus is None: # smbus 초기화 실패 시
+    if bus is None:
         return jsonify({"error": "I2C 버스 초기화 실패"}), 500
         
     try:
         bus.write_byte(address, A0)
-
-        # time.sleep(0.01) 
-
         bus.read_byte(address)
-        soil_moisture_value = bus.read_byte(address) # 실제 값 (0-255 범위, 8비트)
+        soil_moisture_value = bus.read_byte(address)
 
-        # 8비트 ADC (0-255)
         min_moisture_raw = 20 
         max_moisture_raw = 220  
         
@@ -279,7 +328,7 @@ def get_soil_moisture_data():
         if max_moisture_raw == min_moisture_raw:
              soil_moisture_percentage = 0
         else:
-             soil_moisture_percentage = 100 * ( (moisture_raw_value - min_moisture_raw) / (max_moisture_raw - min_moisture_raw)) # 습할수록 raw 값이 낮아지는 저항성 센서 가정
+             soil_moisture_percentage = 100 * ( (moisture_raw_value - min_moisture_raw) / (max_moisture_raw - min_moisture_raw))
 
         soil_moisture_percentage = round(soil_moisture_percentage, 1)
 
@@ -290,54 +339,48 @@ def get_soil_moisture_data():
 
     except IOError as e:
         print(f"I/O 오류 발생 (PCF8591): {e}")
-       
         return jsonify({"error": f"PCF8591 통신 오류: {e}"}), 500
     except Exception as e:
         print(f"토양 수분 센서 예외 발생: {e}")
         return jsonify({"error": f"토양 수분 센서 처리 중 예외 발생: {e}"}), 500
 
 
-def _read_tem_humi_data(): #send_data_periodically() 을 위한 내부함수
+def _read_tem_humi_data():
     if dhtDevice is None:
         print("error: Sensor not initialized")
-        return                  
+        return None
     try:
         temperature_c = dhtDevice.temperature
         humidity = dhtDevice.humidity
         
         if temperature_c is not None and humidity is not None:
-            print(f"send_data_periodically() 측정 성공: Temp={temperature_c:.1f}C, Humidity={humidity}%")
-            
+            print(f"측정 성공: Temp={temperature_c:.1f}C, Humidity={humidity}%")
             return {
                 "temperature": temperature_c,
                 "humidity": humidity
             }
         else:
-            print("error: Failed to retrieve data from sensor. Please try again.")
-            return
+            print("error: Failed to retrieve data from sensor.")
+            return None
 
     except RuntimeError as error:
         print(f"센서 읽기 오류: {error.args[0]}")
-        return 
+        return None
     
     except Exception as e:
         print(f"예외 발생: {e}")
-        return 
+        return None
     
-def _read_soil_moisture_data(): # send_data_periodically() 을 위한 내부함수
-    if bus is None: # smbus 초기화 실패 시
+def _read_soil_moisture_data():
+    if bus is None:
         print("error: I2C 버스 초기화 실패")
-        return 
+        return None
         
     try:
         bus.write_byte(address, A0)
-
-        # time.sleep(0.01) 
-
         bus.read_byte(address)
-        soil_moisture_value = bus.read_byte(address) # 실제 값 (0-255 범위, 8비트)
+        soil_moisture_value = bus.read_byte(address)
 
-        # 8비트 ADC (0-255)
         min_moisture_raw = 20 
         max_moisture_raw = 220  
         
@@ -346,25 +389,26 @@ def _read_soil_moisture_data(): # send_data_periodically() 을 위한 내부함�
         if max_moisture_raw == min_moisture_raw:
              soil_moisture_percentage = 0
         else:
-             soil_moisture_percentage = 100 * ((moisture_raw_value - min_moisture_raw) / (max_moisture_raw - min_moisture_raw)) # 습할수록 raw 값이 낮아지는 저항성 센서 가정
+             soil_moisture_percentage = 100 * ((moisture_raw_value - min_moisture_raw) / (max_moisture_raw - min_moisture_raw))
 
         soil_moisture_percentage = round(soil_moisture_percentage, 1)
 
         print(f"토양 수분 측정 성공: Raw={soil_moisture_value}, Percentage={soil_moisture_percentage}%")
-        return ({
+        return {
             "soil_moisture": soil_moisture_percentage
-        })
+        }
 
     except IOError as e:
         print(f"I/O 오류 발생 (PCF8591): {e}")
-        return
+        return None
     
     except Exception as e:
         print(f"토양 수분 센서 예외 발생: {e}")
-        return
+        return None
 
-def send_data_periodically(): # 주기마다 센서 데이터 장고서버로 전송 
-    tem_humi_data = _read_tem_humi_data()       # 센서값 read 하는 내부함수 따로 호출
+def send_data_periodically():
+    """주기마다 센서 데이터 장고서버로 전송 및 자동 제어 실행"""
+    tem_humi_data = _read_tem_humi_data()
     soil_moi_data = _read_soil_moisture_data()
     
     if tem_humi_data is None or soil_moi_data is None:
@@ -373,10 +417,20 @@ def send_data_periodically(): # 주기마다 센서 데이터 장고서버로 �
 
     merged_data = {**tem_humi_data, **soil_moi_data}
     
+    # ===== 자동 제어 로직 실행 =====
+    current_humidity = tem_humi_data.get('humidity')
+    current_soil_moisture = soil_moi_data.get('soil_moisture')
     
+    if current_humidity is not None:
+        auto_humidifier_control(current_humidity)
+    
+    if current_soil_moisture is not None:
+        auto_pump_control(current_soil_moisture)
+    
+    # 장고 서버로 데이터 전송
     headers = {'Content-Type': 'application/json'}
     try:
-        response = requests.post(POST_SENSOR_DATAS_URL,json= merged_data, headers=headers)
+        response = requests.post(POST_SENSOR_DATAS_URL, json=merged_data, headers=headers)
         if response.status_code == 200:
             print("서버에 데이터 전송 성공:", response.json())
         else:
@@ -384,80 +438,84 @@ def send_data_periodically(): # 주기마다 센서 데이터 장고서버로 �
     except Exception as e:
         print("서버 전송 실패:", e)
         
-def get_setting_soil_moisture_threshold(): # 장고서버에 저장돼있는 토양수분 기준값 get요청
+def get_setting_soil_moisture_threshold():
+    """장고서버에 저장돼있는 토양수분 기준값 get요청"""
+    global current_soil_moisture_threshold
+    
     try:
         response = requests.get(GET_SOIL_MOISTURE_THRESHOLD_URL)
         if response.status_code == 200:
             data = response.json()
-            value = data.get('value')
+            value = data.get('value', {}).get('soil_moisture_threshold')
             
             if value is not None:
-                print("받은 토양수분기준 값:", value)
+                current_soil_moisture_threshold = float(value)
+                print(f"✅ 토양수분 임계값 업데이트: {current_soil_moisture_threshold}%")
                 save_setting(value)
             else:
-                print("값 없음:", data)
+                print("토양수분 임계값 없음:", data)
         else:
-            print("에러 응답:", response.status_code, response.text)
+            print("토양수분 임계값 가져오기 에러:", response.status_code, response.text)
     except Exception as e:
-        print("예외 발생:", e)
+        print("토양수분 임계값 가져오기 예외:", e)
 
-def get_setting_humidity_threshold(): # 장고서버에 저장돼있는 습도  기준값 get요청
+def get_setting_humidity_threshold():
+    """장고서버에 저장돼있는 습도 기준값 get요청"""
+    global current_humidity_threshold
+    
     try:
         response = requests.get(GET_HUMIDITY_THRESHOLD_URL)
         if response.status_code == 200:
             data = response.json()
-            value = data.get('value')
+            value = data.get('value', {}).get('humidity_threshold')  # Django 뷰 수정 필요
             
             if value is not None:
-                print("받은 습도기준 값:", value)
+                current_humidity_threshold = float(value)
+                print(f"✅ 습도 임계값 업데이트: {current_humidity_threshold}%")
                 save_setting(value)
             else:
-                print("값 없음:", data)
+                print("습도 임계값 없음:", data)
         else:
-            print("에러 응답:", response.status_code, response.text)
+            print("습도 임계값 가져오기 에러:", response.status_code, response.text)
     except Exception as e:
-        print("예외 발생:", e)
+        print("습도 임계값 가져오기 예외:", e)
         
-def background_loop_1(): # get_setting_soil_moisture_threshold()를 주기적으로 호출
+def background_loop_1():
+    """설정값들을 주기적으로 가져오는 루프"""
     while True:
-        time.sleep(60)  # 테스트로 1분 마다
+        time.sleep(60)  # 1분마다
         get_setting_soil_moisture_threshold()
-         
+        get_setting_humidity_threshold()
 
-def background_loop_2(): # send_data_periodically()를 주기적으로 호출
+def background_loop_2():
+    """센서 데이터 전송 및 자동 제어를 주기적으로 실행하는 루프"""
     while True:
-        time.sleep(60)  # 테스트로 1분 마다 
+        time.sleep(60)  # 1분마다 
         send_data_periodically()
-
-
-# @app.route('/sensor/temp', methods=['GET'])
-# @app.route('/sensor/humi', methods=['GET'])
-# def get_tem_humi_data(): # 실제 센서에서 읽는 값으로 바꾸세요
-
-#     temperature = 23.7
-#     humidity = 55.1
-#     return jsonify({
-#         "temperature": temperature,
-#         "humidity": humidity
-#     })
-    
-# @app.route('/sensor/soil', methods=['GET']) 
-# def get_soil_moisture_data():
-#     # 실제 센서에서 읽는 값으로 바꾸세요
-    
-#     soil_moisture = 41.1
-#     return jsonify({
-#         "soil_moisture": soil_moisture,
-#     })
-    
 
 @app.route('/')
 def index():
-    return jsonify({"message": "라즈베리파이 Flask 서버가 작동 중입니다."})
+    return jsonify({
+        "message": "라즈베리파이 Flask 서버가 작동 중입니다.",
+        "auto_control_status": {
+            "soil_moisture_threshold": current_soil_moisture_threshold,
+            "humidity_threshold": current_humidity_threshold,
+            "pump_busy": pump_is_busy,
+            "humidifier_busy": humidifier_is_busy
+        }
+    })
 
 if __name__ == '__main__':
-    init_db() #db 초기화
-    threading.Thread(target=background_loop_1, daemon=True).start()  # 백그라운드로 실행
-    #별도 스레드에서 5분마다 데이터 전송 실행
+    init_db()
+    
+    # 시작 시 임계값들을 한 번 가져오기
+    print("🚀 서버 시작 - 초기 임계값 설정 중...")
+    get_setting_soil_moisture_threshold()
+    get_setting_humidity_threshold()
+    
+    # 백그라운드 스레드 시작
+    threading.Thread(target=background_loop_1, daemon=True).start()
     threading.Thread(target=background_loop_2, daemon=True).start()
+    
+    print("✅ 자동 제어 시스템이 활성화되었습니다!")
     app.run(host='0.0.0.0', port=5000)
