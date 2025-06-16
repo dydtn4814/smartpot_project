@@ -94,7 +94,8 @@ def timed_pump_control():
     # pump_thread = threading.Thread(target=_operate_pump_for_duration)
     _operate_pump_for_duration()
 
-
+    message = f"워터 펌프 작동을 시작합니다."
+    print(message)
     return jsonify({"status": "success", "message": message, "pump_state": "on", "duration": duration_seconds})
 
 

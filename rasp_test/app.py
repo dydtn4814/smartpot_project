@@ -13,8 +13,9 @@ app = Flask(__name__)
 
 POST_SENSOR_DATAS_URL = "http://192.168.0.34:8000/sensor/receive/"  #네트워크 바꾸고 , 장고서버 열떄 python manage.py runserver 0.0.0.0:8000
 
-GET_SOIL_MOISTURE_THRESHOLD_URL = "http://127.0.0.1:8000/soil_moisture_threshold/"
-
+GET_SOIL_MOISTURE_THRESHOLD_URL = "http://192.168.0.34:8000/soil_moisture_threshold/"
+# 와이파이주소 업데이터하기
+# GET_SOIL_HUMIDITY_THRESHOLD_URL = "http://192.168.0.34:8000/humidity_threshold/"
 
 #온습도 센서 설정
 TEM_HUMI_SENSOR_PIN = board.D23
@@ -38,7 +39,78 @@ except FileNotFoundError:
 except Exception as e:
     print(f"SMBus 초기화 중 오류 발생: {e}")
     bus = None
+# 워터 펌프 릴레이 핀 설정
+PUMP_PIN_NUMBER = board.D17
+pump_pin = None
+PUMP_OFF_STATE = True  # Active-LOW  HIGH가 꺼짐
+PUMP_ON_STATE = False  # Active-LOW  LOW가 켜짐
+try:
+    pump_pin = digitalio.DigitalInOut(PUMP_PIN_NUMBER)
+    pump_pin.direction = digitalio.Direction.OUTPUT
+    pump_pin.value = PUMP_OFF_STATE
+    print(f"펌프 핀 (GPIO{PUMP_PIN_NUMBER.id}) 초기화 완료. 현재 상태: OFF")
+except Exception as e:
+    print(f"펌프 핀 초기화 실패: {e}")
 
+pump_is_busy = False
+pump_lock = threading.Lock()
+duration_seconds = 3
+
+# 헬퍼 함수: 일정 시간 펌프 작동 후 끄기 (스레드에서 실행)
+def _operate_pump_for_duration():
+    global pump_is_busy 
+    
+    if pump_pin is None:
+        print("오류: 펌프 핀이 초기화되지 않아 작동할 수 없습니다.")
+        with pump_lock: 
+            pump_is_busy = False
+        return
+
+    print(f"{duration_seconds}초 동안 펌프 작동을 시작합니다.")
+    try:
+        pump_pin.value = PUMP_ON_STATE
+        print("펌프 ON")
+        
+        time.sleep(duration_seconds)
+        
+        pump_pin.value = PUMP_OFF_STATE
+        print("펌프 OFF")
+        
+    except Exception as e:
+        print(f"펌프 작동 중 오류 발생: {e}")
+        if pump_pin:
+            pump_pin.value = PUMP_OFF_STATE
+            print("오류 발생으로 펌프 강제 OFF")
+    finally:
+        with pump_lock:
+            pump_is_busy = False
+        print("펌프 작동 완료, 플래그 해제.")
+        return 1
+
+# 워터 펌프 요청 처리 함수
+@app.route('/control/pump', methods=['POST'])
+def timed_pump_control():
+    global pump_is_busy 
+
+    if pump_pin is None:
+        return jsonify({"error": "펌프 핀이 초기화되지 않았습니다."}), 500
+
+    with pump_lock:
+        if pump_is_busy:
+            print("펌프가 이미 작동 중입니다. 새로운 요청을 무시합니다.")
+            return jsonify({"status": "busy", "message": "펌프가 이미 작동 중입니다. 잠시 후 시도해주세요."}), 429 
+        pump_is_busy = True 
+
+    # 스레드를 생성하여 펌프 작동 함수 실행
+   # pump_thread = threading.Thread(target=_operate_pump_for_duration)
+    if _operate_pump_for_duration() == 1:
+        message = "worked!"
+
+    
+    return jsonify({"status": "success", "message": message, "pump_state": "on", "duration": duration_seconds})
+
+
+@app.route('/sensor/humi', methods=['GET'])
 @app.route('/sensor/temp', methods=['GET']) # 장고서버에서 온습도 요청시 실행
 def get_tem_humi_data():
     if dhtDevice is None:
@@ -90,7 +162,7 @@ def get_soil_moisture_data():
         if max_moisture_raw == min_moisture_raw:
              soil_moisture_percentage = 0
         else:
-             soil_moisture_percentage = 100 * (1 - (moisture_raw_value - min_moisture_raw) / (max_moisture_raw - min_moisture_raw)) # 습할수록 raw 값이 낮아지는 저항성 센서 가정
+             soil_moisture_percentage = 100 * ( (moisture_raw_value - min_moisture_raw) / (max_moisture_raw - min_moisture_raw)) # 습할수록 raw 값이 낮아지는 저항성 센서 가정
 
         soil_moisture_percentage = round(soil_moisture_percentage, 1)
 
@@ -157,13 +229,13 @@ def _read_soil_moisture_data(): # send_data_periodically() 을 위한 내부함�
         if max_moisture_raw == min_moisture_raw:
              soil_moisture_percentage = 0
         else:
-             soil_moisture_percentage = 100 * (1 - (moisture_raw_value - min_moisture_raw) / (max_moisture_raw - min_moisture_raw)) # 습할수록 raw 값이 낮아지는 저항성 센서 가정
+             soil_moisture_percentage = 100 * ((moisture_raw_value - min_moisture_raw) / (max_moisture_raw - min_moisture_raw)) # 습할수록 raw 값이 낮아지는 저항성 센서 가정
 
         soil_moisture_percentage = round(soil_moisture_percentage, 1)
 
         print(f"토양 수분 측정 성공: Raw={soil_moisture_value}, Percentage={soil_moisture_percentage}%")
         return ({
-            "soil_moisture_percentage": soil_moisture_percentage
+            "soil_moisture": soil_moisture_percentage
         })
 
     except IOError as e:
@@ -178,12 +250,16 @@ def send_data_periodically(): # 주기마다 센서 데이터 장고서버로 �
     tem_humi_data = _read_tem_humi_data()       # 센서값 read 하는 내부함수 따로 호출
     soil_moi_data = _read_soil_moisture_data()
     
+    if tem_humi_data is None or soil_moi_data is None:
+        print("센서 데이터가 None입니다. 전송생략")
+        return
+
     merged_data = {**tem_humi_data, **soil_moi_data}
     
-    merged_data = json.dumps(merged_data)
+    
     headers = {'Content-Type': 'application/json'}
     try:
-        response = requests.post(POST_SENSOR_DATAS_URL, merged_data, headers=headers)
+        response = requests.post(POST_SENSOR_DATAS_URL,json= merged_data, headers=headers)
         if response.status_code == 200:
             print("서버에 데이터 전송 성공:", response.json())
         else:
@@ -200,6 +276,23 @@ def get_setting_soil_moisture_threshold(): # 장고서버에 저장돼있는 토
             
             if value is not None:
                 print("받은 토양수분기준 값:", value)
+                save_setting(value)
+            else:
+                print("값 없음:", data)
+        else:
+            print("에러 응답:", response.status_code, response.text)
+    except Exception as e:
+        print("예외 발생:", e)
+
+def get_setting_humidity_threshold(): # 장고서버에 저장돼있는 습도  기준값 get요청
+    try:
+        response = requests.get(GET_HUMIDITY_THRESHOLD_URL)
+        if response.status_code == 200:
+            data = response.json()
+            value = data.get('value')
+            
+            if value is not None:
+                print("받은 습도기준 값:", value)
                 save_setting(value)
             else:
                 print("값 없음:", data)
