@@ -32,8 +32,8 @@ except Exception as e:
 # 워터 펌프 릴레이 핀 설정
 PUMP_PIN_NUMBER = board.D17
 pump_pin = None
-PUMP_OFF_STATE = True  # Active-LOW  HIGH가 꺼짐
-PUMP_ON_STATE = False  # Active-LOW  LOW가 켜짐
+PUMP_OFF_STATE = False  # Active-LOW  HIGH가 꺼짐
+PUMP_ON_STATE = True # Active-LOW  LOW가 켜짐
 try:
     pump_pin = digitalio.DigitalInOut(PUMP_PIN_NUMBER)
     pump_pin.direction = digitalio.Direction.OUTPUT
@@ -75,6 +75,28 @@ def _operate_pump_for_duration():
         with pump_lock:
             pump_is_busy = False
         print("펌프 작동 완료, 플래그 해제.")
+
+# 워터 펌프 요청 처리 함수
+@app.route('/control/pump', methods=['POST'])
+def timed_pump_control():
+    global pump_is_busy 
+
+    if pump_pin is None:
+        return jsonify({"error": "펌프 핀이 초기화되지 않았습니다."}), 500
+
+    with pump_lock:
+        if pump_is_busy:
+            print("펌프가 이미 작동 중입니다. 새로운 요청을 무시합니다.")
+            return jsonify({"status": "busy", "message": "펌프가 이미 작동 중입니다. 잠시 후 시도해주세요."}), 429 
+        pump_is_busy = True 
+
+    # 스레드를 생성하여 펌프 작동 함수 실행
+    # pump_thread = threading.Thread(target=_operate_pump_for_duration)
+    _operate_pump_for_duration()
+
+
+    return jsonify({"status": "success", "message": message, "pump_state": "on", "duration": duration_seconds})
+
 
 app = Flask(__name__)
 
@@ -145,27 +167,6 @@ def get_soil_moisture_data():
     except Exception as e:
         print(f"토양 수분 센서 예외 발생: {e}")
         return jsonify({"error": f"토양 수분 센서 처리 중 예외 발생: {e}"}), 500
-
-# 워터 펌프 요청 처리 함수
-@app.route('/control/pump', methods=['POST'])
-def timed_pump_control():
-    global pump_is_busy 
-
-    if pump_pin is None:
-        return jsonify({"error": "펌프 핀이 초기화되지 않았습니다."}), 500
-
-    with pump_lock:
-        if pump_is_busy:
-            print("펌프가 이미 작동 중입니다. 새로운 요청을 무시합니다.")
-            return jsonify({"status": "busy", "message": "펌프가 이미 작동 중입니다. 잠시 후 시도해주세요."}), 429 
-        pump_is_busy = True 
-
-    # 스레드를 생성하여 펌프 작동 함수 실행
-    pump_thread = threading.Thread(target=_operate_pump_for_duration)
-
-    message = f"워터 펌프 작동을 시작합니다."
-    print(message)
-    return jsonify({"status": "success", "message": message, "pump_state": "on", "duration": duration_seconds})
 
 
 if __name__ == '__main__':

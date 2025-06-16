@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import SensorData, SoilMoistureThreshold
+from .models import SensorData, SoilMoistureThreshold, HumidityThreshold
 
 class SensorDataSerializer(serializers.ModelSerializer):
     class Meta:
@@ -12,3 +12,8 @@ class SoilMoistureThresholdSerializer(serializers.ModelSerializer):
         model = SoilMoistureThreshold
         fields = ['value','updated_at']
         
+        
+class HumidityThresholdSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HumidityThreshold
+        fields = ['value','updated_at']

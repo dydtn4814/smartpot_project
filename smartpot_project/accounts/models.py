@@ -15,3 +15,11 @@ class SoilMoistureThreshold(models.Model): # 자동급수 토양수분 기준 �
 
     def __str__(self):
         return f"Threshold: {self.value}% (updated at {self.updated_at})"
+    
+class HumidityThreshold(models.Model): # 자동급수 토양수분 기준 모델
+    value = models.FloatField(help_text="기준 습도 (%)")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Threshold: {self.value}% (updated at {self.updated_at})"
+    

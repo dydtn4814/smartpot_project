@@ -11,6 +11,8 @@ urlpatterns = [
     path('sensor/receive/', views.receive_sensor_data, name='receive_sensor_data'),
     path('setting/soil_moisture_threshold/', views.set_soil_moisture_threshold, name='set_soil_moisture_threshold'),
     path('soil_moisture_threshold/', views.get_soil_moisture_threshold, name='get_soil_moisture_threshold'),
+    path('humidity_threshold/', views.get_humidity_threshold, name='get_humidity_threshold'),
+    path('setting_values/', views.get_setting_values, name='get_setting_values'),
     path('setting_values/', views.get_setting_values, name='get_setting_values'),
     
 ]

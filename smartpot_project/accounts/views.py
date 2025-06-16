@@ -6,7 +6,7 @@ from django.views.decorators.csrf import csrf_exempt
 import requests
 import json
 
-from .models import SensorData, SoilMoistureThreshold
+from .models import SensorData, SoilMoistureThreshold, HumidityThreshold
 from django.utils import timezone
 from datetime import timedelta
 
@@ -78,8 +78,7 @@ def kakao_webhook(request):
                 if pump_response_data.get("status") == "busy":
                     reply_text = pump_response_data.get("message", "펌프가 이미 작동 중이에요. 잠시 후 다시 시도해주세요.")
                 else:
-                    duration_sent = pump_response_data.get("duration")
-                    reply_text = pump_response_data.get("message", f"{duration_sent}초 동안 물을 주기 시작했어요! 🌱")
+                    reply_text = (f" 물 주기 완료! 💧")
 
             except requests.RequestException:
                 reply_text = "펌프에 명령을 보내는 데 실패했어요. 잠시 후 다시 시도해주세요."
@@ -170,7 +169,12 @@ def get_setting_values(request):
             soil_moi_tres_val = None
         else: 
             soil_moi_tres_val = SoilMoistureThreshold.objects.first().value
-        
+            
+        if HumidityThreshold.objects.first() == None:
+            humi_tres_val = None
+        else: 
+            humi_tres_val = HumidityThreshold.objects.first().value
+
         # 습도 기준값도 추가하기
 
         return JsonResponse(
@@ -180,7 +184,7 @@ def get_setting_values(request):
             "outputs": [
                 {
                 "simpleText": {
-                    "text": f"현재 기준 토양수분값 : {soil_moi_tres_val}%"
+                    "text": f"현재 기준 토양수분 값 : {soil_moi_tres_val}%\n 현재 기준 습도 : {humi_tres_val} "
                 }
             }
             ],
@@ -233,28 +237,38 @@ def set_soil_moisture_threshold(request):
 
         text = f"기준 토양습도\n🌱{previous_threshold}% 에서\n🌱{threshold_value}% 로 설정되었습니다."
         return JsonResponse(make_kakao_response(text))
-        # return JsonResponse(
-        #     {
-        #     "version": "2.0",
-        #     "template": {
-        #         "outputs": [
-        #             {
-        #             "simpleText": {
-        #                 "text": f"기준 토양습도 🌱{previous_threshold}% 에서 🌱{threshold_value}%로 설정되었습니다."
-        #             }
-        #         }
-        #         ],
-        #         "quickReplies": [
-        #               {
-        #                 "label": "🏠처음으로",
-        #                 "action": "block",
-        #                 "blockId": "683941302c50e1482b1ed155", 
-        #             },  
-        #               ] 
-            
-        #     }
-        #     })
+       
 
+@csrf_exempt
+def set_humidity_threshold(request):
+     if request.method == 'POST':
+        body = json.loads(request.body)
+        user_message = body.get('userRequest', {}).get('utterance', '')
+        try:  
+            threshold_value = float(user_message)  # 숫자로 변환 시도
+        except ValueError:
+            return JsonResponse({
+                "version": "2.0",
+                "template": {
+                    "outputs": [{
+                        "simpleText": {
+                            "text": "숫자만 입력 해주세요. (예:28)"
+                        }
+                    }]
+                }
+            })
+
+        # 기존 값 삭제하고 저장 (또는 update)
+        if(HumidityThreshold.objects.first()==None):
+            previous_threshold = 'None'
+        else:
+            previous_threshold = HumidityThreshold.objects.first().value
+
+        HumidityThreshold.objects.all().delete()
+        HumidityThreshold.objects.create(value=threshold_value)
+
+        text = f"기준 토양습도\n🌱{previous_threshold}% 에서\n🌱{threshold_value}% 로 설정되었습니다."
+        return JsonResponse(make_kakao_response(text))
 
 
 
@@ -267,6 +281,34 @@ def get_soil_moisture_threshold(request):
             # 현재 저장된 토양 습도 임계값 가져오기
             # SoilMoistureThreshold 모델에 최소한 하나의 객체가 있다고 가정
             threshold_obj = SoilMoistureThreshold.objects.first() 
+            
+            if threshold_obj:
+                current_threshold = threshold_obj.value
+            else:
+                # 설정값이 아직 없을 경우  에러 처리
+        
+                return JsonResponse({"error": "No soil moisture threshold set yet."}, status=404)
+                
+            return JsonResponse({
+                "status": "success",
+                "value": {
+                    "soil_moisture_threshold": current_threshold
+                }
+            })
+        except Exception as e:
+            return JsonResponse({
+                "status": "error",
+                "message": f"데이터를 가져오는 중 오류 발생: {str(e)}"
+            }, status=500)
+    else:
+        return JsonResponse({"status": "error", "message": "GET 요청만 허용됩니다."}, status=405)
+
+# 설정값을 제공하는 API 뷰 (GET 요청만 허용)
+@csrf_exempt 
+def get_humidity_threshold(request):
+    if request.method == 'GET':
+        try:
+            threshold_obj = HumidityThreshold.objects.first() 
             
             if threshold_obj:
                 current_threshold = threshold_obj.value
