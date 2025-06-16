@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request # request 임포트
 import threading
 import time
 import requests
@@ -8,6 +8,9 @@ import smbus
 import digitalio
 import json
 from db import init_db, save_setting
+
+# --- 네오픽셀 라이브러리 ---
+import neopixel
 
 app = Flask(__name__)
 
@@ -105,10 +108,124 @@ def timed_pump_control():
    # pump_thread = threading.Thread(target=_operate_pump_for_duration)
     if _operate_pump_for_duration() == 1:
         message = "worked!"
-
     
     return jsonify({"status": "success", "message": message, "pump_state": "on", "duration": duration_seconds})
 
+# --- 가습기 모듈 핀 설정 추가 ---
+# 릴레이 없이 GPIO에 직접 연결하는 경우 (VCC, GND, DIN)
+HUMIDIFIER_PIN_NUMBER = board.D24 # GPIO 24번 핀 사용 예시
+humidifier_pin = None
+try:
+    humidifier_pin = digitalio.DigitalInOut(HUMIDIFIER_PIN_NUMBER)
+    humidifier_pin.direction = digitalio.Direction.OUTPUT
+    humidifier_pin.value = False # 초기 상태는 꺼짐 (LOW)
+    print(f"가습기 핀 (GPIO{HUMIDIFIER_PIN_NUMBER.id}) 초기화 완료.")
+except Exception as e:
+    print(f"가습기 핀 초기화 실패: {e}")
+
+# --- 가습기 작동 상태 및 동시 실행 방지를 위한 변수 추가 ---
+humidifier_is_busy = False
+humidifier_lock = threading.Lock()
+FIXED_HUMIDIFIER_DURATION_SECONDS = 3 # 가습기 작동 시간 3초로 고정
+
+# --- 헬퍼 함수: 일정 시간 가습기 작동 (스레드에서 실행) 추가 ---
+def _operate_humidifier_for_duration():
+    global humidifier_is_busy
+    
+    if humidifier_pin is None:
+        print("오류: 가습기 핀이 초기화되지 않아 작동할 수 없습니다.")
+        with humidifier_lock:
+            humidifier_is_busy = False
+        return
+
+    print(f"{FIXED_HUMIDIFIER_DURATION_SECONDS}초 동안 가습기 작동을 시작합니다.")
+    try:
+        humidifier_pin.value = True # GPIO HIGH로 켜기
+        print("가습기 ON")
+        
+        time.sleep(FIXED_HUMIDIFIER_DURATION_SECONDS) # 설정된 고정 시간만큼 대기
+        
+        humidifier_pin.value = False # GPIO LOW로 끄기
+        print("가습기 OFF")
+        
+    except Exception as e:
+        print(f"가습기 작동 중 오류 발생: {e}")
+        if humidifier_pin:
+            humidifier_pin.value = False
+            print("오류 발생으로 가습기 강제 OFF")
+    finally:
+        with humidifier_lock:
+            humidifier_is_busy = False
+        print("가습기 작동 완료, 플래그 해제.")
+
+# 가습기 제어 API 엔드포인트 추가
+@app.route('/control/humidifier', methods=['POST'])
+def timed_humidifier_control():
+    global humidifier_is_busy
+
+    if humidifier_pin is None:
+        return jsonify({"error": "가습기 핀이 초기화되지 않았습니다."}), 500
+
+    with humidifier_lock:
+        if humidifier_is_busy:
+            print("가습기가 이미 작동 중입니다. 새로운 요청을 무시합니다.")
+            return jsonify({"status": "busy", "message": "가습기가 이미 작동 중입니다. 잠시 후 시도해주세요."}), 429
+        humidifier_is_busy = True
+
+    if _operate_humidifier_for_duration() == 1:
+        message = "worked!"
+
+    print(message)
+    return jsonify({"status": "success", "message": message, "humidifier_state": "on", "duration": FIXED_HUMIDIFIER_DURATION_SECONDS})
+
+# --- 네오픽셀 LED 설정 추가 ---
+# ...
+NEOPIXEL_PIN = board.D18
+NUM_PIXELS = 16
+# --- LED 켜기 명령 시 사용할 기본값 설정 ---
+DEFAULT_BRIGHTNESS = 0.5  # 기본 밝기 (0.1 ~ 1.0)
+DEFAULT_COLOR = (255, 255, 255) # 기본 색상 (흰색)
+pixels = None
+try:
+    pixels = neopixel.NeoPixel(NEOPIXEL_PIN, NUM_PIXELS, auto_write=False)
+    pixels.fill((0, 0, 0)); pixels.show()
+    print("네오픽셀 초기화 완료.")
+except Exception as e:
+    print(f"네오픽셀 초기화 실패: {e}")
+
+# --- API 엔드포인트: /control/led (네오픽셀 제어) ---
+@app.route('/control/led', methods=['POST'])
+def control_led():
+    if pixels is None:
+        return jsonify({"error": "네오픽셀이 초기화되지 않았습니다."}), 500
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "요청 본문이 비어있습니다."}), 400
+        
+        state = data.get('state') # {"state": "on"} 또는 {"state": "off"}
+
+        if state == 'on':
+            pixels.brightness = DEFAULT_BRIGHTNESS
+            pixels.fill(DEFAULT_COLOR)
+            pixels.show()
+            message = "네오픽셀 LED를 켰습니다."
+
+        elif state == 'off':
+            pixels.fill((0, 0, 0))
+            pixels.show()
+            message = "네오픽셀 LED를 껐습니다."
+            
+        else:
+            return jsonify({"error": "잘못된 state 값입니다. 'on' 또는 'off'를 사용하세요."}), 400
+        
+        print(message)
+        return jsonify({"status": "success", "message": message})
+
+    except Exception as e:
+        error_message = f"LED 제어 중 오류 발생: {e}"
+        print(error_message)
+        return jsonify({"error": error_message}), 500    
 
 @app.route('/sensor/humi', methods=['GET'])
 @app.route('/sensor/temp', methods=['GET']) # 장고서버에서 온습도 요청시 실행
@@ -311,11 +428,7 @@ def background_loop_2(): # send_data_periodically()를 주기적으로 호출
     while True:
         time.sleep(60)  # 테스트로 1분 마다 
         send_data_periodically()
-        
-           
 
-
-        
 
 # @app.route('/sensor/temp', methods=['GET'])
 # @app.route('/sensor/humi', methods=['GET'])
