@@ -294,12 +294,12 @@ def get_humidity_threshold(request):
             else:
                 # 설정값이 아직 없을 경우  에러 처리
         
-                return JsonResponse({"error": "No soil moisture threshold set yet."}, status=404)
+                return JsonResponse({"error": "No humidity threshold set yet."}, status=404)
                 
             return JsonResponse({
                 "status": "success",
                 "value": {
-                    "soil_moisture_threshold": current_threshold
+                    "humidity_threshold": current_threshold
                 }
             })
         except Exception as e:
