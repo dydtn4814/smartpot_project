@@ -17,7 +17,9 @@ RASPI_TEMP_API_URL = "http://192.168.0.15:5000/sensor/temp" #같은와이파이
 RASPI_HUMI_API_URL = "http://192.168.0.15:5000/sensor/humi"
 RASPI_SOIL_API_URL = "http://192.168.0.15:5000/sensor/soil"
 RASPI_PUMP_API_URL = "http://192.168.0.15:5000/control/pump"
-
+RASPI_LED_API_URL = "http://192.168.0.15:5000/control/led"
+RASPI_HUMIDIFIER_API_URL = "http://192.168.0.15:5000/control/humidifier"
+RASPI_FAN_API_URL = "http://192.168.0.15:5000/control/fan"
 
 @csrf_exempt
 def kakao_webhook(request):
@@ -71,7 +73,7 @@ def kakao_webhook(request):
             try:
                 payload = {}
                 
-                response_pump = requests.post(RASPI_PUMP_API_URL, json=payload, timeout=15)
+                response_pump = requests.post(RASPI_PUMP_API_URL, timeout=15)
                 response_pump.raise_for_status()
                 pump_response_data = response_pump.json()
                 
@@ -84,13 +86,58 @@ def kakao_webhook(request):
                 reply_text = "펌프에 명령을 보내는 데 실패했어요. 잠시 후 다시 시도해주세요."
             
             return JsonResponse(make_kakao_response(reply_text))
+        elif "LED" in user_message:
+            try:
+                payload = {}
+                
+                response_led = requests.post(RASPI_LED_API_URL, json=payload, timeout=15)
+                response_led.raise_for_status()
+                # led_response_data = response_led.json()
+                
+            except requests.RequestException:
+                reply_text = "LED에 명령을 보내는 데 실패했어요. 잠시 후 다시 시도해주세요."
+            
+            return JsonResponse(make_kakao_response(reply_text))
+        
+        elif "가습기" in user_message:
+            try:
+                payload = {}
+                
+                response_humidfier = requests.post(RASPI_HUMIDIFIER_API_URL, timeout=15)
+                response_humidfier.raise_for_status()
+                humidfier_response_data = response_humidfier.json()
+                
+                if humidfier_response_data.get("status") == "busy":
+                    reply_text = humidfier_response_data.get("message", "가습가 이미 작동 중이에요. 잠시 후 다시 시도해주세요.")
+                else:
+                    reply_text = (f" 가습기 작동 완료! 💧")
+
+            except requests.RequestException:
+                reply_text = "가습기에 명령을 보내는 데 실패했어요. 잠시 후 다시 시도해주세요."
+            
+            return JsonResponse(make_kakao_response(reply_text))
+        
+        elif "팬 작동" in user_message:
+            try:
+                payload = {}
+                
+                response_pump = requests.post(RASPI_FAN_API_URL, timeout=15)
+                response_pump.raise_for_status()
+                pump_response_data = response_pump.json()
+                
+                if pump_response_data.get("status") == "busy":
+                    reply_text = pump_response_data.get("message", "팬이 이미 작동 중이에요. 잠시 후 다시 시도해주세요.")
+                else:
+                    reply_text = (f" 팬 작동 완료! 💧")
+
+            except requests.RequestException:
+                reply_text = "팬에 명령을 보내는 데 실패했어요. 잠시 후 다시 시도해주세요."
+            
+            return JsonResponse(make_kakao_response(reply_text))
         
         elif "동향" in user_message:
-            return JsonResponse(make_kakao_response(get_recent_sensor_data()))
-         
-        elif "기준 토양수분 설정" in user_message:
-            
-            return JsonResponse(make_kakao_response(get_recent_sensor_data()))
+            return JsonResponse(make_kakao_response(_get_recent_sensor_data()))
+    
         # 기본 응답
         return JsonResponse(make_kakao_response("온도나 습도를 물어보시면 알려드릴게요 🌡️💧"))
         
@@ -99,9 +146,9 @@ def kakao_webhook(request):
     return JsonResponse({'error': 'Invalid request method'}, status=405)
 
 
-# 온습도 동향 조회 구현
+
 @csrf_exempt 
-def receive_sensor_data(request): #라즈베리파이단에서의 데이터 센서값 post요청 받기, db저장
+def receive_sensor_data(request): #라즈베리파이단 서버 측에서 보낸 센서 값들 받는 함수 + db저장
     if request.method == 'POST':
         try:
             data = json.loads(request.body)
@@ -130,7 +177,7 @@ def receive_sensor_data(request): #라즈베리파이단에서의 데이터 센�
         return JsonResponse({"status": "fail", "message": "POST 요청만 허용됩니다"}, status=405)
 
 
-def get_recent_sensor_data(): # 온습도 동향 조회 
+def _get_recent_sensor_data(): # 온습도 동향 조회 
 
     cutoff = timezone.now() - timedelta(hours=1) # 현재시각 기준으로 10분전 데이터들 get
     data_qs = SensorData.objects.filter(timestamp__gte=cutoff).order_by('-timestamp')#최근데이터부터
@@ -147,11 +194,11 @@ def get_recent_sensor_data(): # 온습도 동향 조회
         for d in data_qs
     ]
     
-    text = conv_dic_to_text(data_list)
+    text = _conv_dic_to_text(data_list)
       
     return text
 
-def conv_dic_to_text(data): 
+def _conv_dic_to_text(data): 
   text = ""
   for d in data:
     time = d["timestamp"]
@@ -163,7 +210,7 @@ def conv_dic_to_text(data):
   return text
 
 @csrf_exempt 
-def get_setting_values(request):
+def get_setting_values(request): # 현재 기준 설정값 조회 뷰
     if request.method == 'POST':
         if SoilMoistureThreshold.objects.first() == None:
             soil_moi_tres_val = None
@@ -184,7 +231,7 @@ def get_setting_values(request):
             "outputs": [
                 {
                 "simpleText": {
-                    "text": f"현재 기준 토양수분 값 : {soil_moi_tres_val}%\n 현재 기준 습도 : {humi_tres_val} "
+                    "text": f"🌱현재 기준 토양수분 값 : {soil_moi_tres_val}%\n💧현재 기준 습도 : {humi_tres_val}% "
                 }
             }
             ],
@@ -204,76 +251,8 @@ def get_setting_values(request):
         }
         })
 
-        
-    
 
-@csrf_exempt
-def set_soil_moisture_threshold(request):
-     if request.method == 'POST':
-        body = json.loads(request.body)
-        user_message = body.get('userRequest', {}).get('utterance', '')
-        try:  
-            threshold_value = float(user_message)  # 숫자로 변환 시도
-        except ValueError:
-            return JsonResponse({
-                "version": "2.0",
-                "template": {
-                    "outputs": [{
-                        "simpleText": {
-                            "text": "숫자만 입력 해주세요. (예:28)"
-                        }
-                    }]
-                }
-            })
-
-        # 기존 값 삭제하고 저장 (또는 update)
-        if(SoilMoistureThreshold.objects.first()==None):
-            previous_threshold = 'None'
-        else:
-            previous_threshold = SoilMoistureThreshold.objects.first().value
-
-        SoilMoistureThreshold.objects.all().delete()
-        SoilMoistureThreshold.objects.create(value=threshold_value)
-
-        text = f"기준 토양습도\n🌱{previous_threshold}% 에서\n🌱{threshold_value}% 로 설정되었습니다."
-        return JsonResponse(make_kakao_response(text))
-       
-
-@csrf_exempt
-def set_humidity_threshold(request):
-     if request.method == 'POST':
-        body = json.loads(request.body)
-        user_message = body.get('userRequest', {}).get('utterance', '')
-        try:  
-            threshold_value = float(user_message)  # 숫자로 변환 시도
-        except ValueError:
-            return JsonResponse({
-                "version": "2.0",
-                "template": {
-                    "outputs": [{
-                        "simpleText": {
-                            "text": "숫자만 입력 해주세요. (예:28)"
-                        }
-                    }]
-                }
-            })
-
-        # 기존 값 삭제하고 저장 (또는 update)
-        if(HumidityThreshold.objects.first()==None):
-            previous_threshold = 'None'
-        else:
-            previous_threshold = HumidityThreshold.objects.first().value
-
-        HumidityThreshold.objects.all().delete()
-        HumidityThreshold.objects.create(value=threshold_value)
-
-        text = f"기준 토양습도\n🌱{previous_threshold}% 에서\n🌱{threshold_value}% 로 설정되었습니다."
-        return JsonResponse(make_kakao_response(text))
-
-
-
-
-# 설정값을 제공하는 API 뷰 (GET 요청만 허용)
+ # 라즈베리파이 서버로 토양수분기준값 주는 함수
 @csrf_exempt 
 def get_soil_moisture_threshold(request):
     if request.method == 'GET':
@@ -303,7 +282,7 @@ def get_soil_moisture_threshold(request):
     else:
         return JsonResponse({"status": "error", "message": "GET 요청만 허용됩니다."}, status=405)
 
-# 설정값을 제공하는 API 뷰 (GET 요청만 허용)
+# 라즈베리파이 서버로 습도기준값 주는 함수
 @csrf_exempt 
 def get_humidity_threshold(request):
     if request.method == 'GET':
@@ -330,9 +309,66 @@ def get_humidity_threshold(request):
             }, status=500)
     else:
         return JsonResponse({"status": "error", "message": "GET 요청만 허용됩니다."}, status=405)
+       
+# receive_number() 으로 받은 값 db저장
+def _store_soil_moisture_threshold(threshold_value):
 
+    # 기존 값 삭제하고 저장 (또는 update)
+    if(SoilMoistureThreshold.objects.first()==None):
+        previous_threshold = 'None'
+    else:
+        previous_threshold = SoilMoistureThreshold.objects.first().value
 
+    SoilMoistureThreshold.objects.all().delete()
+    SoilMoistureThreshold.objects.create(value=threshold_value)
 
+    text = f"기준 토양습도\n🌱{previous_threshold}% 에서\n🌱{threshold_value}% 로 설정되었습니다."
+    return text
+
+# receive_number() 으로 받은 값 db저장    
+def _store_humidity_threshold(threshold_value):
+
+    # 기존 값 삭제하고 저장 (또는 update)
+    if(HumidityThreshold.objects.first()==None):
+        previous_threshold = 'None'
+    else:
+        previous_threshold = HumidityThreshold.objects.first().value
+
+    HumidityThreshold.objects.all().delete()
+    HumidityThreshold.objects.create(value=threshold_value)
+
+    text = f"기준 습도\n💧{previous_threshold}% 에서\n💧{threshold_value}% 로 설정되었습니다."
+    return text
+        
+@csrf_exempt 
+def receive_number(request): # 사용자에게서 카카오톡을 통해 설정 값 받는 함수 
+    if request.method == 'POST':
+        body = json.loads(request.body)
+        setting_val = body.get('userRequest', {}).get('utterance', '')
+        context = body.get('contexts',[{}])[0].get('name',' ')
+        
+        try:
+            setting_val = float(setting_val)
+        except ValueError:
+            reply_text = "❗설정값 오류❗"
+            return JsonResponse(make_setting_quickreply_kakao_response(reply_text))
+        
+        if setting_val <= 0 or setting_val > 100:
+            reply_text = "❗설정값 오류❗"
+            return JsonResponse(make_setting_quickreply_kakao_response(reply_text))
+        # 오류메세지 작동 잘 안됨 챗봇 한계인듯?
+        
+        # print(body)
+        # print(setting_val)
+        # print(context)
+        
+        if context == "context_soil_moi": # 토양수분 설정 분기에서 왔으면
+            text = _store_soil_moisture_threshold(setting_val) # 기준토양수분 update
+        elif context == "context_humi": # 습도 설정 분기에서 왔으면
+            text = _store_humidity_threshold(setting_val)   # 기준 습도 update
+        
+        return JsonResponse(make_kakao_response(text))
+    
 def make_sensor_quickreply_kakao_response(text):
     return {
             "version": "2.0",
@@ -397,7 +433,7 @@ def make_kakao_response(text):
             }
         }
     
-def make_home_quickreply_kakao_response(text):
+def make_setting_quickreply_kakao_response(text):
     return {
             "version": "2.0",
             "template": {
@@ -415,12 +451,10 @@ def make_home_quickreply_kakao_response(text):
                         "blockId": "683941302c50e1482b1ed155", 
                     },
                     {
-                        "label": "💧물 주기",
+                        "label": "⚙️설정",
                         "action": "block",
-                        "blockId": "683d4a8047b70d2c1d6921f2",  
+                        "blockId": "68289cdcd9c3e21ccc37740c",  
                     }
                 ]
             }
         }
-    
-    

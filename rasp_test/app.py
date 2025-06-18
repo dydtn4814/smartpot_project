@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import threading
 import time
 import requests
@@ -7,7 +7,8 @@ import adafruit_dht
 import smbus
 import digitalio
 import json
-from db import init_db, save_setting
+import neopixel
+from db import init_db, save_soil_moisture_threshold, save_humidity_threshold
 
 app = Flask(__name__)
 
@@ -15,7 +16,44 @@ POST_SENSOR_DATAS_URL = "http://192.168.0.34:8000/sensor/receive/"  #네트워�
 
 GET_SOIL_MOISTURE_THRESHOLD_URL = "http://192.168.0.34:8000/soil_moisture_threshold/"
 # 와이파이주소 업데이터하기
-# GET_SOIL_HUMIDITY_THRESHOLD_URL = "http://192.168.0.34:8000/humidity_threshold/"
+GET_HUMIDITY_THRESHOLD_URL = "http://192.168.0.34:8000/humidity_threshold/"
+
+LED_STATE = 0 #led 제
+
+# FAN 펌프 릴레이 핀 설정
+FAN_PIN_NUMBER = board.D19
+FAN_pin = None
+FAN_OFF_STATE = True  # Active-LOW  HIGH가 꺼짐
+FAN_ON_STATE = False  # Active-LOW  LOW가 켜짐
+try:
+    FAN_pin = digitalio.DigitalInOut(FAN_PIN_NUMBER)
+    FAN_pin.direction = digitalio.Direction.OUTPUT
+    FAN_pin.value = FAN_OFF_STATE
+    print(f"펌프 핀 (GPIO{FAN_PIN_NUMBER.id}) 초기화 완료. 현재 상태: OFF")
+except Exception as e:
+    print(f"펌프 핀 초기화 실패: {e}")
+
+FAN_is_busy = False
+FAN_lock = threading.Lock()
+duration_seconds = 3
+
+
+# --- 가습기 모듈 핀 설정 추가 ---
+# 릴레이 없이 GPIO에 직접 연결하는 경우 (VCC, GND, DIN)
+HUMIDIFIER_PIN_NUMBER = board.D13 # GPIO 24번 핀 사용 예시
+humidifier_pin = None
+try:
+    humidifier_pin = digitalio.DigitalInOut(HUMIDIFIER_PIN_NUMBER)
+    humidifier_pin.direction = digitalio.Direction.OUTPUT
+    humidifier_pin.value = False # 초기 상태는 꺼짐 (LOW)
+    print(f"가습기 핀 (GPIO{HUMIDIFIER_PIN_NUMBER.id}) 초기화 완료.")
+except Exception as e:
+    print(f"가습기 핀 초기화 실패: {e}")
+
+# --- 가습기 작동 상태 및 동시 실행 방지를 위한 변수 추가 ---
+humidifier_is_busy = False
+humidifier_lock = threading.Lock()
+FIXED_HUMIDIFIER_DURATION_SECONDS = 15 # 가습기 작동 시간 3초로 고정
 
 #온습도 센서 설정
 TEM_HUMI_SENSOR_PIN = board.D23
@@ -55,6 +93,169 @@ except Exception as e:
 pump_is_busy = False
 pump_lock = threading.Lock()
 duration_seconds = 3
+
+# --- 네오픽셀 LED 설정 추가 ---
+# ...
+NEOPIXEL_PIN = board.D18
+NUM_PIXELS = 12
+# --- LED 켜기 명령 시 사용할 기본값 설정 ---
+DEFAULT_BRIGHTNESS = 0.5  # 기본 밝기 (0.1 ~ 1.0)
+DEFAULT_COLOR = (173,216, 255) # 기본 색상 (흰색)
+pixels = None
+try:
+    pixels = neopixel.NeoPixel(NEOPIXEL_PIN, NUM_PIXELS, auto_write=False)
+    pixels.fill((0, 0, 0)); pixels.show()
+    print("네오픽셀 초기화 완료.")
+except Exception as e:
+    print(f"네오픽셀 초기화 실패: {e}")
+
+# 헬퍼 함수: 일정 시간 펌프 작동 후 끄기 (스레드에서 실행)
+def _operate_FAN_for_duration():
+    global FAN_is_busy
+
+    if FAN_pin is None:
+        print("오류: FAN 핀이 초기화되지 않아 작동할 수 없습니다.")
+        with FAN_lock:
+            FAN_is_busy = False
+        return
+
+    print(f"{duration_seconds}초 동안 FAN 작동을 시작합니다.")
+    try:
+        FAN_pin.value = FAN_ON_STATE
+        print("FAN ON")
+
+        time.sleep(duration_seconds)
+
+        FAN_pin.value = FAN_OFF_STATE
+        print("FAN OFF")
+
+    except Exception as e:
+        print(f"FAN 작동 중 오류 발생: {e}")
+        if FAN_pin:
+            FAN_pin.value = FAN_OFF_STATE
+            print("오류 발생으로 FAN 강제 OFF")
+    finally:
+        with FAN_lock:
+            FAN_is_busy = False
+        print("FAN 작동 완료, 플래그 해제.")
+        return 1
+
+# 워터 펌프 요청 처리 함수
+@app.route('/control/fan', methods=['POST'])
+def timed_FAN_control():
+    global FAN_is_busy
+
+    if FAN_pin is None:
+        return jsonify({"error": "FAN 핀이 초기화되지 않았습니다."}), 500
+
+    with FAN_lock:
+        if FAN_is_busy:
+            print("FAN이 이미 작동 중입니다. 새로운 요청을 무시합니다.")
+            return jsonify({"status": "busy", "message": "펌프가 이미 작동 중입니다. 잠시 후 시도해주세요."}), 429
+        FAN_is_busy = True
+
+    # 스레드를 생성하여 펌프 작동 함수 실행
+   # pump_thread = threading.Thread(target=_operate_pump_for_duration)
+    if _operate_FAN_for_duration() == 1:
+        message = "worked!"
+
+
+    return jsonify({"status": "success", "message": message, "pump_state": "on", "duration": duration_seconds})
+
+
+
+# --- 헬퍼 함수: 일정 시간 가습기 작동 (스레드에서 실행) 추가 ---
+def _operate_humidifier_for_duration():
+    global humidifier_is_busy
+
+    if humidifier_pin is None:
+        print("오류: 가습기 핀이 초기화되지 않아 작동할 수 없습니다.")
+        with humidifier_lock:
+            humidifier_is_busy = False
+        return
+
+    print(f"{FIXED_HUMIDIFIER_DURATION_SECONDS}초 동안 가습기 작동을 시작합니다.")
+    try:
+        humidifier_pin.value = True # GPIO HIGH로 켜기
+        print("가습기 ON")
+
+        time.sleep(FIXED_HUMIDIFIER_DURATION_SECONDS) # 설정된 고정 시간만큼 대기
+
+        humidifier_pin.value = False # GPIO LOW로 끄기
+        print("가습기 OFF")
+
+    except Exception as e:
+        print(f"가습기 작동 중 오류 발생: {e}")
+        if humidifier_pin:
+            humidifier_pin.value = False
+            print("오류 발생으로 가습기 강제 OFF")
+    finally:
+        with humidifier_lock:
+            humidifier_is_busy = False
+        print("가습기 작동 완료, 플래그 해제.")
+
+# 가습기 제어 API 엔드포인트 추가
+@app.route('/control/humidifier', methods=['POST'])
+def timed_humidifier_control():
+    global humidifier_is_busy
+    message = "test"
+    if humidifier_pin is None:
+        return jsonify({"error": "가습기 핀이 초기화되지 않았습니다."}), 500
+
+    with humidifier_lock:
+        if humidifier_is_busy:
+            print("가습기가 이미 작동 중입니다. 새로운 요청을 무시합니다.")
+            return jsonify({"status": "busy", "message": "가습기가 이미 작동 중입니다. 잠시 후 시도해주세요."}), 429
+        humidifier_is_busy = True
+
+    if _operate_humidifier_for_duration() == 1:
+        message = "worked!"
+
+    
+    return jsonify({"status": "success", "message": message, "humidifier_state": "on", "duration": FIXED_HUMIDIFIER_DURATION_SECONDS})
+
+# --- API 엔드포인트: /control/led (네오픽셀 제어) ---
+@app.route('/control/led', methods=['POST'])
+def control_led():
+    
+    if pixels is None:
+        return jsonify({"error": "네오픽셀이 초기화되지 않았습니다."}), 500
+    global LED_STATE
+    try:
+        # data = request.get_json()
+        # if not data:
+        #     return jsonify({"error": "요청 본문이 비어있습니다."}), 400
+        
+        # state = data.get('state') # {"state": "on"} 또는 {"state": "off"}
+
+        if LED_STATE == 0:
+            LED_STATE = 1
+            pixels.brightness = DEFAULT_BRIGHTNESS
+            pixels.fill(DEFAULT_COLOR)
+            pixels.show()
+            message = "네오픽셀 LED를 켰습니다."
+
+        elif LED_STATE == 1:
+            LED_STATE = 0
+            pixels.fill((0, 0, 0))
+            pixels.show()
+            message = "네오픽셀 LED를 껐습니다."
+            
+
+
+
+
+
+        else:
+            return jsonify({"error": "잘못된 state 값입니다. 'on' 또는 'off'를 사용하세요."}), 400
+
+        print(message)
+        return jsonify({"status": "success", "message": message})
+
+    except Exception as e:
+        error_message = f"LED 제어 중 오류 발생: {e}"
+        print(error_message)
+        return jsonify({"error": error_message}), 500
 
 # 헬퍼 함수: 일정 시간 펌프 작동 후 끄기 (스레드에서 실행)
 def _operate_pump_for_duration():
@@ -272,11 +473,11 @@ def get_setting_soil_moisture_threshold(): # 장고서버에 저장돼있는 토
         response = requests.get(GET_SOIL_MOISTURE_THRESHOLD_URL)
         if response.status_code == 200:
             data = response.json()
-            value = data.get('value')
+            value = data.get('value')[0]
             
             if value is not None:
                 print("받은 토양수분기준 값:", value)
-                save_setting(value)
+                save_soil_moisture_threshold(value)
             else:
                 print("값 없음:", data)
         else:
@@ -289,11 +490,11 @@ def get_setting_humidity_threshold(): # 장고서버에 저장돼있는 습도  
         response = requests.get(GET_HUMIDITY_THRESHOLD_URL)
         if response.status_code == 200:
             data = response.json()
-            value = data.get('value')
+            value = data.get('value')[0]
             
             if value is not None:
                 print("받은 습도기준 값:", value)
-                save_setting(value)
+                save_humidity_threshold(value)
             else:
                 print("값 없음:", data)
         else:
@@ -305,7 +506,7 @@ def background_loop_1(): # get_setting_soil_moisture_threshold()를 주기적으
     while True:
         time.sleep(60)  # 테스트로 1분 마다
         get_setting_soil_moisture_threshold()
-         
+        get_setting_humidity_threshold() 
 
 def background_loop_2(): # send_data_periodically()를 주기적으로 호출
     while True:
@@ -348,3 +549,4 @@ if __name__ == '__main__':
     #별도 스레드에서 5분마다 데이터 전송 실행
     threading.Thread(target=background_loop_2, daemon=True).start()
     app.run(host='0.0.0.0', port=5000)
+
