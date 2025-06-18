@@ -473,7 +473,7 @@ def get_setting_soil_moisture_threshold(): # 장고서버에 저장돼있는 토
         response = requests.get(GET_SOIL_MOISTURE_THRESHOLD_URL)
         if response.status_code == 200:
             data = response.json()
-            value = data.get('value')[0]
+            value = data.get('value').get('soil_moisture_threshold')
             
             if value is not None:
                 print("받은 토양수분기준 값:", value)
@@ -490,7 +490,7 @@ def get_setting_humidity_threshold(): # 장고서버에 저장돼있는 습도  
         response = requests.get(GET_HUMIDITY_THRESHOLD_URL)
         if response.status_code == 200:
             data = response.json()
-            value = data.get('value')[0]
+            value = data.get('value').get('humidity_threshold')
             
             if value is not None:
                 print("받은 습도기준 값:", value)
