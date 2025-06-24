@@ -7,6 +7,7 @@ import adafruit_dht
 import smbus
 import digitalio
 import json
+from datetime import datetime  # datetime 추가
 from db import init_db, save_setting
 
 # --- 네오픽셀 라이브러리 ---
@@ -15,6 +16,7 @@ import neopixel
 app = Flask(__name__)
 
 POST_SENSOR_DATAS_URL = "http://192.168.0.34:8000/sensor/receive/"  #네트워크 바꾸고 , 장고서버 열떄 python manage.py runserver 0.0.0.0:8000
+POST_AUTO_CONTROL_LOGS_URL = "http://192.168.0.34:8000/auto_control_logs/"  # 자동 제어 로그 전송 URL 추가
 
 GET_SOIL_MOISTURE_THRESHOLD_URL = "http://192.168.0.34:8000/soil_moisture_threshold/"
 GET_HUMIDITY_THRESHOLD_URL = "http://192.168.0.34:8000/humidity_threshold/"
@@ -94,6 +96,11 @@ last_auto_pump_time = 0
 last_auto_humidifier_time = 0
 AUTO_CONTROL_COOLDOWN = 300  # 5분 쿨다운 (같은 장치 연속 작동 방지)
 
+# ===== 자동 제어 시간 기록을 위한 전역 변수 추가 =====
+last_auto_pump_datetime = None      # 자동 급수 작동 시간
+last_auto_humidifier_datetime = None  # 자동 가습기 작동 시간
+auto_control_logs_lock = threading.Lock()  # 로그 데이터 동기화용 락
+
 # 헬퍼 함수: 일정 시간 펌프 작동 후 끄기 (스레드에서 실행)
 def _operate_pump_for_duration():
     global pump_is_busy 
@@ -156,10 +163,10 @@ def _operate_humidifier_for_duration():
         print("가습기 작동 완료, 플래그 해제.")
         return 1
 
-# ===== 자동 제어 함수들 추가 =====
+# ===== 자동 제어 함수들 수정 (시간 기록 추가) =====
 def auto_pump_control(current_soil_moisture):
     """토양 수분이 임계값보다 낮으면 자동으로 펌프 작동"""
-    global last_auto_pump_time, pump_is_busy
+    global last_auto_pump_time, pump_is_busy, last_auto_pump_datetime
     
     if current_soil_moisture_threshold is None:
         return
@@ -178,6 +185,11 @@ def auto_pump_control(current_soil_moisture):
                 pump_is_busy = True
                 last_auto_pump_time = current_time
                 
+                # 자동 급수 작동 시간 기록
+                with auto_control_logs_lock:
+                    last_auto_pump_datetime = datetime.now().isoformat()
+                    print(f"📅 자동 급수 시간 기록: {last_auto_pump_datetime}")
+                
                 # 백그라운드에서 펌프 작동
                 pump_thread = threading.Thread(target=_operate_pump_for_duration)
                 pump_thread.daemon = True
@@ -185,7 +197,7 @@ def auto_pump_control(current_soil_moisture):
 
 def auto_humidifier_control(current_humidity):
     """습도가 임계값보다 낮으면 자동으로 가습기 작동"""
-    global last_auto_humidifier_time, humidifier_is_busy
+    global last_auto_humidifier_time, humidifier_is_busy, last_auto_humidifier_datetime
     
     if current_humidity_threshold is None:
         return
@@ -204,10 +216,57 @@ def auto_humidifier_control(current_humidity):
                 humidifier_is_busy = True
                 last_auto_humidifier_time = current_time
                 
+                # 자동 가습기 작동 시간 기록
+                with auto_control_logs_lock:
+                    last_auto_humidifier_datetime = datetime.now().isoformat()
+                    print(f"📅 자동 가습기 시간 기록: {last_auto_humidifier_datetime}")
+                
                 # 백그라운드에서 가습기 작동
                 humidifier_thread = threading.Thread(target=_operate_humidifier_for_duration)
                 humidifier_thread.daemon = True
                 humidifier_thread.start()
+
+# ===== 자동 제어 로그 전송 함수 추가 =====
+def send_auto_control_logs():
+    """자동 제어 작동 시간 로그를 Django 서버로 전송"""
+    global last_auto_pump_datetime, last_auto_humidifier_datetime
+    
+    with auto_control_logs_lock:
+        # 전송할 데이터가 있는지 확인
+        if last_auto_pump_datetime is None and last_auto_humidifier_datetime is None:
+            return
+        
+        # 전송할 로그 데이터 구성
+        log_data = {}
+        
+        if last_auto_pump_datetime is not None:
+            log_data['last_auto_pump_time'] = last_auto_pump_datetime
+            
+        if last_auto_humidifier_datetime is not None:
+            log_data['last_auto_humidifier_time'] = last_auto_humidifier_datetime
+        
+        # 전송 후 초기화할 데이터 백업
+        temp_pump_time = last_auto_pump_datetime
+        temp_humidifier_time = last_auto_humidifier_datetime
+    
+    # Django 서버로 로그 데이터 전송
+    headers = {'Content-Type': 'application/json'}
+    try:
+        response = requests.post(POST_AUTO_CONTROL_LOGS_URL, json=log_data, headers=headers)
+        if response.status_code == 200:
+            print("✅ 자동 제어 로그 전송 성공:", response.json())
+            
+            # 전송 성공 시 해당 로그 데이터 초기화
+            with auto_control_logs_lock:
+                if temp_pump_time == last_auto_pump_datetime:
+                    last_auto_pump_datetime = None
+                if temp_humidifier_time == last_auto_humidifier_datetime:
+                    last_auto_humidifier_datetime = None
+                    
+        else:
+            print("❌ 자동 제어 로그 전송 에러:", response.status_code, response.text)
+    except Exception as e:
+        print("❌ 자동 제어 로그 전송 실패:", e)
 
 # 워터 펌프 요청 처리 함수
 @app.route('/control/pump', methods=['POST'])
@@ -427,16 +486,19 @@ def send_data_periodically():
     if current_soil_moisture is not None:
         auto_pump_control(current_soil_moisture)
     
-    # 장고 서버로 데이터 전송
+    # 장고 서버로 센서 데이터 전송
     headers = {'Content-Type': 'application/json'}
     try:
         response = requests.post(POST_SENSOR_DATAS_URL, json=merged_data, headers=headers)
         if response.status_code == 200:
-            print("서버에 데이터 전송 성공:", response.json())
+            print("서버에 센서 데이터 전송 성공:", response.json())
         else:
             print("서버 응답 에러:", response.status_code, response.text)
     except Exception as e:
         print("서버 전송 실패:", e)
+    
+    # 자동 제어 로그 전송
+    send_auto_control_logs()
         
 def get_setting_soil_moisture_threshold():
     """장고서버에 저장돼있는 토양수분 기준값 get요청"""
@@ -494,15 +556,10 @@ def background_loop_2():
         send_data_periodically()
 
 @app.route('/')
+
 def index():
     return jsonify({
-        "message": "라즈베리파이 Flask 서버가 작동 중입니다.",
-        "auto_control_status": {
-            "soil_moisture_threshold": current_soil_moisture_threshold,
-            "humidity_threshold": current_humidity_threshold,
-            "pump_busy": pump_is_busy,
-            "humidifier_busy": humidifier_is_busy
-        }
+        "message": "라즈베리파이 Flask 서버가 작동 중입니다."
     })
 
 if __name__ == '__main__':
