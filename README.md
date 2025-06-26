@@ -1,9 +1,9 @@
-🌱💬 카카오톡 챗봇 기반 스마트화분 프로젝트
-<div align="center">
-📱 KakaoTalk Chatbot Smart Plant Pot System
-🌟 카카오톡으로 언제 어디서나 내 식물을 돌보세요! 🌟
+#🌱💬 카카오톡 챗봇 기반 스마트화분 프로젝트
+
+
+##📱 KakaoTalk Chatbot Smart Plant Pot System
+###🌟 카카오톡으로 언제 어디서나 내 식물을 돌보세요! 🌟
 라즈베리파이와 카카오톡 챗봇을 연동하여 원격으로 식물을 관리할 수 있는 IoT 스마트화분 시스템
-</div>
 
 
 🌱 스마트화분 프로젝트 (Smart Plant Pot)
