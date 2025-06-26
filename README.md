@@ -64,5 +64,5 @@ LED 조명 제어 (밝기, 시간 설정)
 "물주기": 수동 물주기 실행
 "조명 켜기/끄기": LED 조명 제어
 "설정": 알림 및 자동화 설정
-
+https://youtube.com/shorts/SjU1oD-EuGA?si=dlGu34VxCKjqU33k
 
